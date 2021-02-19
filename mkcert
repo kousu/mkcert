@@ -47,8 +47,9 @@ _genpkey() {
 
 newCA() {
   DAYS="$1"; shift
-  ALG=${1:-ED25519} # see `man req` for the options; but be
+  ALG="${ALG:-ED25519}"
   #ALG=RSA
+
   mkdir -p "${CAROOT}"
   chmod 700 "${CAROOT}"
   O="mkcert development certificate"
@@ -83,8 +84,10 @@ newCA() {
   #
   # "error 20 at 0 depth lookup: unable to get local issuer certificate"
 
-  openssl req -x509 -in "${ROOTCA}.csr" -days "${DAYS}" -config /dev/null -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' -addext 'keyUsage=critical,keyCertSign' -key "${ROOTCA_KEY}" -sha256 -out "${ROOTCA}"
+  #openssl req -x509 -in "${ROOTCA}.csr" -days "${DAYS}" -config /dev/null -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' -addext 'keyUsage=critical,keyCertSign' -key "${ROOTCA_KEY}" -sha256 -out "${ROOTCA}"
   # ^ this works!
+  # -config /dev/null cancels the default basicConstraints=critical,CA:TRUE that openssl wants to add (and th
+  openssl req -x509 -in "${ROOTCA}.csr" -days "${DAYS}" -config /dev/null -addext 'keyUsage=critical,keyCertSign' -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' -addext 'subjectKeyIdentifier=hash' -addext 'authorityKeyIdentifier=keyid,issuer' -key "${ROOTCA_KEY}" -sha256 -out "${ROOTCA}"
 
   #openssl x509 -req -in "${ROOTCA}.csr" -days "${DAYS}" -signkey "${ROOTCA_KEY}" -sha256 -out "${ROOTCA}"
   # ^ this doesn't work; despite 
@@ -108,10 +111,10 @@ newCA() {
   # ^ and this doesn't work because, of course, you can't use a CSR to sign anything, but you can't use -CAkey without a cert to go with it
 
   # what if we generate a throwaway cert first?
-  openssl req -x509 -key "${ROOTCA_KEY}" -out "${ROOTCA}-temp" -subj "$distinguished_name" -days 1
-  SERIAL=$(mktemp -u)
+  #openssl req -x509 -key "${ROOTCA_KEY}" -out "${ROOTCA}-temp" -subj "$distinguished_name" -days 1
+  #SERIAL=$(mktemp -u)
   #openssl x509 -req -in "${ROOTCA}.csr" -days "${DAYS}" -CA "${ROOTCA}-temp" -CAkey "${ROOTCA_KEY}" -sha256 -out "${ROOTCA}"  -CAcreateserial -CAserial $SERIAL -extfile <((cat /etc/ssl/openssl.cnf <(echo "[cab]"; echo 'keyUsage=critical,keyCertSign'; echo 'basicConstraints=critical,CA:TRUE,pathlen:0'; echo; echo)) | tee /tmp/ca) -extensions cab
-  rm -f "$SERIAL"
+  #rm -f "$SERIAL"
   # lmao this worked
 
   # this ridiculous set of commands is motivated by trying to control the certificate extensions on the cert
@@ -144,10 +147,10 @@ uninstallCA() {
 }
 
 newCert() {
-  # usage: newCert {RSA,ED25519
-  ALG="ED25519"
+  # usage: ALG={RSA,ED25519,...} newCert days hostname [hostname2 hostname3 ...]
   DAYS="$1"; shift
   HOSTNAME="$1"
+  ALG="${ALG:-ED25519}"
   #ALG=RSA
   KEY="$HOSTNAME-key.pem"
   CERT="$HOSTNAME.pem"
@@ -166,14 +169,21 @@ newCert() {
 
   # sign the cert
   #  - I'm circumventing the serial-number tracking that openssl does because I don't care about it and openssl is stupid.
-  # This uses a bash-ism from https://stackoverflow.com/a/53826340/2898673 in order to incorporate subjectAltNames
+  # This uses the tip from https://stackoverflow.com/a/53826340/2898673 in order to incorporate subjectAltNames
   SERIAL=$(mktemp -u)
-  openssl x509 -req -in "$CERT.csr" -CA "$ROOTCA" -CAkey "$ROOTCA_KEY" -days "$DAYS" -sha256 -out "$CERT" -CAcreateserial -CAserial $SERIAL -extfile <((cat /etc/ssl/openssl.cnf <(echo "[SAN]"; echo "$altnames"; echo; echo)) | tee /tmp/a) -extensions SAN
-  #openssl x509 -req -in "$CERT.csr" -CA "$ROOTCA" -CAkey "$ROOTCA_KEY" -days "$DAYS" -sha256 -out "$CERT" -CAcreateserial -CAserial $SERIAL
-  #openssl x509 -req -in "$CERT.csr" -CA "$ROOTCA" -CAkey "$ROOTCA_KEY" -days "$DAYS" -sha256 -out "$CERT" -CAcreateserial -CAserial $SERIAL -addext "$altnames"
-  cat $SERIAL
+  EXTFILE=$(mktemp)
+  cat >"$EXTFILE" <<EOF
+[exts]
+keyUsage=digitalSignature,keyEncipherment
+authorityKeyIdentifier=keyid,issuer
+
+$altnames
+EOF
+  openssl x509 -req -in "$CERT.csr" -CA "$ROOTCA" -CAkey "$ROOTCA_KEY" -days "$DAYS" -sha256 -out "$CERT" -CAcreateserial -CAserial $SERIAL -extfile "$EXTFILE" -extensions 'exts'
+  #cat $SERIAL
   rm "${SERIAL}" # BUG: if openssl fails we won't get here to clean this up!
-  #rm "${CERT}.csr"
+  rm "${EXTFILE}"
+  rm "${CERT}.csr"
 
   # lol openssl: in man x509:
   # > BUGS
@@ -189,13 +199,13 @@ newCert() {
   # copy_extensions=true
   # but only if you want to use ca(1), which seems like more trouble than it's worth to me
 
-  
   openssl x509 -in $CERT -text #DEBUG
 
   # make sure this cert verifies
-  openssl verify -no-CApath -no-CAfile -CAfile "$ROOTCA" "$CERT"
+  for hostname in "$@"; do
+    openssl verify -no-CApath -no-CAfile -CAfile "$ROOTCA" -verify_hostname "$hostname" "$CERT"
+  done
 
-  # TODO: use subject alt names to support multiple hostnames on one cert
 }
 
 newCA 3650
